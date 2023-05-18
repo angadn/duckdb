@@ -114,4 +114,32 @@ TEST_CASE("Test arrow in C API", "[capi]") {
 		duckdb_destroy_arrow(&arrow_result);
 		duckdb_destroy_prepare(&stmt);
 	}
+
+	// test scan arrow
+	{
+		REQUIRE(duckdb_prepare(tester.connection, "SELECT CAST($1 AS BIGINT)", &stmt) == DuckDBSuccess);
+		REQUIRE(stmt != nullptr);
+		REQUIRE(duckdb_bind_int64(stmt, 1, 42) == DuckDBSuccess);
+		REQUIRE(duckdb_execute_prepared_arrow(stmt, nullptr) == DuckDBError);
+		REQUIRE(duckdb_execute_prepared_arrow(stmt, &arrow_result) == DuckDBSuccess);
+
+		ArrowSchema *arrow_schema = new ArrowSchema();
+		REQUIRE(duckdb_query_arrow_schema(arrow_result, (duckdb_arrow_schema *)&arrow_schema) == DuckDBSuccess);
+		REQUIRE(string(arrow_schema->format) == "+s");
+
+		ArrowArray *arrow_array = new ArrowArray();
+		REQUIRE(duckdb_query_arrow_array(arrow_result, (duckdb_arrow_array *)&arrow_array) == DuckDBSuccess);
+		REQUIRE(arrow_array->length == 1);
+
+		REQUIRE(duckdb_arrow_array_scan(tester.connection, "foo_table", (duckdb_arrow_schema)arrow_schema,
+		                                (duckdb_arrow_array)arrow_array) == DuckDBSuccess);
+
+		arrow_schema->release(arrow_schema);
+		delete arrow_schema;
+		arrow_array->release(arrow_array);
+		delete arrow_array;
+
+		duckdb_destroy_arrow(&arrow_result);
+		duckdb_destroy_prepare(&stmt);
+	}
 }
