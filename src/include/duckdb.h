@@ -1099,10 +1099,12 @@ Scans the Arrow array and creates a temporary view with the given name.
 * table_name: Name of the temporary view to create.
 * arrow_schema: Arrow schema wrapper.
 * arrow_array: Arrow array wrapper.
+* out_stream: Output array stream that wraps around the passed schema, for releasing/deleting once done.
 * returns: `DuckDBSuccess` on success or `DuckDBError` on failure.
 */
 DUCKDB_API duckdb_state duckdb_arrow_array_scan(duckdb_connection connection, const char *table_name,
-                                                duckdb_arrow_schema arrow_schema, duckdb_arrow_array arrow_array);
+                                                duckdb_arrow_schema arrow_schema, duckdb_arrow_array arrow_array,
+                                                duckdb_arrow_stream *out_stream);
 
 //===--------------------------------------------------------------------===//
 // Extract Statements

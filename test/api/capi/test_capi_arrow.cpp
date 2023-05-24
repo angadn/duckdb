@@ -1,4 +1,6 @@
 #include "capi_tester.hpp"
+#include "duckdb/common/arrow/arrow_appender.hpp"
+#include "duckdb/common/arrow/arrow_converter.hpp"
 
 using namespace duckdb;
 using namespace std;
@@ -115,27 +117,123 @@ TEST_CASE("Test arrow in C API", "[capi]") {
 		duckdb_destroy_prepare(&stmt);
 	}
 
-	// test scan arrow
+	// test scan empty arrow
 	{
-		REQUIRE(duckdb_prepare(tester.connection, "SELECT CAST($1 AS BIGINT)", &stmt) == DuckDBSuccess);
-		REQUIRE(stmt != nullptr);
-		REQUIRE(duckdb_bind_int64(stmt, 1, 42) == DuckDBSuccess);
-		REQUIRE(duckdb_execute_prepared_arrow(stmt, nullptr) == DuckDBError);
-		REQUIRE(duckdb_execute_prepared_arrow(stmt, &arrow_result) == DuckDBSuccess);
+		// Create a table with a `value` column from 1..1M.
+		const auto logical_types = duckdb::vector<LogicalType> {LogicalType(LogicalTypeId::INTEGER)};
+		const auto column_names = duckdb::vector<string> {"value"};
 
 		ArrowSchema *arrow_schema = new ArrowSchema();
-		REQUIRE(duckdb_query_arrow_schema(arrow_result, (duckdb_arrow_schema *)&arrow_schema) == DuckDBSuccess);
-		REQUIRE(string(arrow_schema->format) == "+s");
+		duckdb::ArrowConverter::ToArrowSchema(arrow_schema, logical_types, column_names, "");
 
+		// Empty array.
 		ArrowArray *arrow_array = new ArrowArray();
-		REQUIRE(duckdb_query_arrow_array(arrow_result, (duckdb_arrow_array *)&arrow_array) == DuckDBSuccess);
-		REQUIRE(arrow_array->length == 1);
 
-		REQUIRE(duckdb_arrow_array_scan(tester.connection, "foo_table", (duckdb_arrow_schema)arrow_schema,
-		                                (duckdb_arrow_array)arrow_array) == DuckDBSuccess);
+		// Create temporary view.
+		string view_name = "foo_empty_table";
+		ArrowArrayStream *out_stream;
+		REQUIRE(duckdb_arrow_array_scan(tester.connection, view_name.c_str(),
+		                                reinterpret_cast<duckdb_arrow_schema>(arrow_schema),
+		                                reinterpret_cast<duckdb_arrow_array>(arrow_array),
+		                                reinterpret_cast<duckdb_arrow_stream *>(&out_stream)) == DuckDBSuccess);
+
+		// Get created view from DB.
+		auto get_query = "SELECT * FROM " + view_name + ";";
+		REQUIRE(duckdb_prepare(tester.connection, get_query.c_str(), &stmt) == DuckDBSuccess);
+		REQUIRE(stmt != nullptr);
+		REQUIRE(duckdb_execute_prepared_arrow(stmt, &arrow_result) == DuckDBSuccess);
+
+		// Recover array from results.
+		ArrowArray *out_array = new ArrowArray();
+		REQUIRE(duckdb_query_arrow_array(arrow_result, reinterpret_cast<duckdb_arrow_array *>(&out_array)) ==
+		        DuckDBSuccess);
+		REQUIRE(out_array->length == 0);
+		REQUIRE(out_array->release == nullptr);
+		delete out_array;
+
+		out_stream->release(out_stream);
+		delete out_stream;
 
 		arrow_schema->release(arrow_schema);
 		delete arrow_schema;
+
+		REQUIRE(arrow_array->release == nullptr);
+		delete arrow_array;
+
+		duckdb_destroy_arrow(&arrow_result);
+		duckdb_destroy_prepare(&stmt);
+	}
+
+	// test scan arrow
+	{
+		// Create a table with a `value` column from 1..1M.
+		int num_buffers = 2, size = STANDARD_VECTOR_SIZE * num_buffers;
+		const auto logical_types = duckdb::vector<LogicalType> {LogicalType(LogicalTypeId::INTEGER)};
+		const auto column_names = duckdb::vector<string> {"value"};
+
+		ArrowSchema *arrow_schema = new ArrowSchema();
+		duckdb::ArrowConverter::ToArrowSchema(arrow_schema, logical_types, column_names, "");
+
+		ArrowAppender appender(logical_types, size);
+		Allocator allocator;
+
+		auto data_chunks = std::vector<DataChunk>(num_buffers);
+		for (int i = 0; i < num_buffers; i++) {
+			auto data_chunk = &data_chunks[i];
+			data_chunk->Initialize(allocator, logical_types, STANDARD_VECTOR_SIZE);
+			data_chunk->SetCardinality(STANDARD_VECTOR_SIZE);
+			for (int row = 0; row < STANDARD_VECTOR_SIZE; row++) {
+				data_chunk->SetValue(0, row, duckdb::Value(i));
+			}
+
+			appender.Append(*data_chunk, 0, data_chunk->size(), data_chunk->size());
+		}
+
+		ArrowArray *arrow_array = new ArrowArray();
+		*arrow_array = appender.Finalize();
+
+		// Create temporary view.
+		string view_name = "foo_table";
+		ArrowArrayStream *out_stream;
+		REQUIRE(duckdb_arrow_array_scan(tester.connection, view_name.c_str(),
+		                                reinterpret_cast<duckdb_arrow_schema>(arrow_schema),
+		                                reinterpret_cast<duckdb_arrow_array>(arrow_array),
+		                                reinterpret_cast<duckdb_arrow_stream *>(&out_stream)) == DuckDBSuccess);
+
+		// Get created view from DB.
+		auto get_query = "SELECT * FROM " + view_name + ";";
+		REQUIRE(duckdb_prepare(tester.connection, get_query.c_str(), &stmt) == DuckDBSuccess);
+		REQUIRE(stmt != nullptr);
+		REQUIRE(duckdb_execute_prepared_arrow(stmt, &arrow_result) == DuckDBSuccess);
+
+		// Recover array from results.
+		ArrowArray *out_array = new ArrowArray();
+		REQUIRE(duckdb_query_arrow_array(arrow_result, reinterpret_cast<duckdb_arrow_array *>(&out_array)) ==
+		        DuckDBSuccess);
+		REQUIRE(out_array->length == STANDARD_VECTOR_SIZE);
+		out_array->release(out_array);
+		delete out_array;
+
+		out_array = new ArrowArray();
+		REQUIRE(duckdb_query_arrow_array(arrow_result, reinterpret_cast<duckdb_arrow_array *>(&out_array)) ==
+		        DuckDBSuccess);
+		REQUIRE(out_array->length == STANDARD_VECTOR_SIZE);
+		out_array->release(out_array);
+		delete out_array;
+
+		out_array = new ArrowArray();
+		REQUIRE(duckdb_query_arrow_array(arrow_result, reinterpret_cast<duckdb_arrow_array *>(&out_array)) ==
+		        DuckDBSuccess);
+		REQUIRE(out_array->length == 0);
+		REQUIRE(out_array->release == nullptr);
+		delete out_array;
+
+		out_stream->release(out_stream);
+		delete out_stream;
+
+		arrow_schema->release(arrow_schema);
+		delete arrow_schema;
+
 		arrow_array->release(arrow_array);
 		delete arrow_array;
 
